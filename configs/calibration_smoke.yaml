@@ -1,0 +1,64 @@
+# =============================================================================
+# Calibration configuration (SMOKE test)
+# =============================================================================
+# Tiny, fast version of configs/calibration.yaml for local sanity checks: very
+# few Optuna trials and few simulated images per trial. The fitted values are
+# NOT meaningful -- this only verifies the calibration pipeline runs end to end
+# and produces outputs. Use configs/calibration.yaml for a real fit.
+# =============================================================================
+
+base_sim_config: configs/sim_default.yaml
+
+data:
+  dir: data
+  glob: "*.tif*"
+  channel: 1
+  size: 512
+  crop: center
+  max_value: 255
+  limit: 6          # only a handful of real images for speed
+
+optuna:
+  n_trials: 8       # tiny -- smoke test only
+  n_sim_images: 3
+  seed: 0
+
+statistics:
+  hist_bins: 64
+
+# Same fit/pinned split as the real config (see calibration.yaml for rationale).
+fit:
+  psf.sigma:                        {low: 0.5, high: 3.0}
+  ring.brightness:                  {low: 10.0, high: 300.0}
+  ring.thickness:                   {low: 0.8, high: 6.0}
+  noise.gain:                       {low: 0.2, high: 5.0, log: true}
+  noise.enf:                        {low: 1.0, high: 2.0}
+  noise.read_noise:                 {low: 0.0, high: 10.0}
+  noise.optical_bg:                 {low: 0.0, high: 30.0}
+  noise.offset:                     {low: 0.0, high: 80.0}
+  guvs.density:                     {low: 1.0, high: 60.0}
+  guvs.sphere_diameter_log_mean:    {low: 2.5, high: 4.5}
+  guvs.sphere_diameter_log_sigma:   {low: 0.2, high: 0.9}
+  background.oof_amplitude:         {low: 0.0, high: 40.0}
+  aggregates.amplitude:             {low: 200.0, high: 3000.0, log: true}
+
+pinned:
+  - cut.axial_extent
+  - cut.offset_max_frac
+
+discrepancy:
+  terms:
+    mean:                  {enabled: true, weight: 3.0}
+    median:                {enabled: true, weight: 3.0}
+    p99:                   {enabled: true, weight: 0.3}
+    p999:                  {enabled: true, weight: 0.3}
+    skewness:              {enabled: true, weight: 0.5}
+    histogram_wasserstein: {enabled: true, weight: 100.0}
+    radial_psd:            {enabled: true, weight: 1.0}
+    psd_low_band:          {enabled: true, weight: 3.0, max_bin: 8}
+
+output:
+  dir: calibration_out_smoke
+  fitted_json: fitted_params.json
+  fitted_config: fitted_config.yaml
+  comparison_plot: comparison.png

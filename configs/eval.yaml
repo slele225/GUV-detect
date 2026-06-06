@@ -1,0 +1,27 @@
+# =============================================================================
+# Evaluation configuration
+# =============================================================================
+# Run:  uv run python src/evaluate.py --config configs/eval.yaml
+# Reports overall precision/recall/F1 + radius MAE on the synthetic val set, and
+# precision/recall binned by crowding (GUVs per image).
+# =============================================================================
+
+checkpoint: runs/guvnet/best.pt
+device: cuda              # auto-falls back to CPU if unavailable
+
+data:
+  root: dataset
+  split: val
+  limit: null            # cap #val images evaluated (null = all)
+
+detect:
+  threshold: 0.3         # heatmap peak threshold for a detection
+  nms_dist: 6.0          # suppress peaks within this center distance (px)
+  down_ratio: 1          # must match model.out_stride used in training
+
+match:
+  tol_frac: 0.5          # a pred matches a GT if center distance <= tol_frac * gt_radius
+
+# Right-open crowding bins by GUV count per image; last edge is the "+" bucket.
+# e.g. edges [0,6,16,31] -> bins "0-5", "6-15", "16-30", "31+".
+crowding_bins: [0, 6, 16, 31]

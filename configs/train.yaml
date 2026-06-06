@@ -1,0 +1,50 @@
+# =============================================================================
+# Training configuration for the CenterNet-style GUV detector
+# =============================================================================
+# Run:  uv run python src/train.py --config configs/train.yaml
+#       uv run python src/train.py --config configs/train.yaml --smoke
+# =============================================================================
+
+data:
+  root: dataset           # output of src/generate_dataset.py (uint8 PNG images)
+  num_workers: 8          # set via N_WORKERS in run_all.sh
+  limit: null             # cap #train images (null = all); --smoke overrides
+  # Heatmap Gaussian sigma scales with object radius: sigma = clip(radius *
+  # sigma_scale, sigma_min, sigma_max), in output-resolution pixels.
+  sigma_scale: 0.15
+  sigma_min: 1.5
+  sigma_max: 8.0
+
+model:
+  base: 32                # U-Net first-level width (doubles each downsample)
+  depth: 4                # number of downsample levels
+  out_stride: 1           # 1 = FULL-resolution heatmap (keep close centers
+                          # separable in crowded fields). Must be a power of 2.
+
+loss:
+  heatmap_weight: 1.0     # focal loss on the center heatmap
+  radius_weight: 0.1      # L1 on radius at GT centers (radius is in pixels, so a
+                          # smaller weight keeps it balanced against the heatmap)
+  focal_alpha: 2.0
+  focal_beta: 4.0
+
+train:
+  device: cuda            # "cuda" for the H100; auto-falls back to CPU
+  epochs: 60
+  batch_size: 32          # 32 is safe; raise to 64 if GPU memory allows
+  lr: 0.0003
+  weight_decay: 0.0001
+  warmup_frac: 0.02       # linear warmup over this fraction of total steps
+                          # (~1 epoch); then cosine decay to ~0. (Or warmup_steps.)
+  amp: true               # mixed precision (autocast + GradScaler) on CUDA
+  out_dir: runs/guvnet    # checkpoints (best.pt/last.pt) + viz/ go here
+  viz_n: 4                # # of val predictions visualized each epoch
+  # --smoke overrides:
+  smoke_epochs: 2
+  smoke_limit: 50
+
+# Detection settings used for the per-epoch val visualizations (kept consistent
+# with configs/eval.yaml so what you watch matches what you score).
+detect:
+  threshold: 0.3
+  nms_dist: 6.0

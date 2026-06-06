@@ -1,0 +1,66 @@
+# =============================================================================
+# Synthetic training-dataset generation
+# =============================================================================
+# Generates labeled images with the CALIBRATED forward model for training a GUV
+# detector. Only IN-FOCUS GUVs are labeled; the out-of-focus haze and the
+# saturated aggregates are NEVER labeled -- they are distractors the detector
+# must learn to ignore.
+#
+# See src/generate_dataset.py. Run:
+#   uv run python src/generate_dataset.py --config configs/dataset.yaml
+# =============================================================================
+
+# Calibrated simulator parameters (the physics the calibration constrained).
+base_config: calibration_out/fitted_config.yaml
+
+output:
+  dir: dataset
+  image_format: png      # uint8 PNG to MATCH the real 512x512 uint8 images. The
+                         # training loader and detect.py apply the SAME [0,1]
+                         # normalization (src/normalize.py) so they can't drift.
+                         # ("npy" float32 is also supported but breaks that match.)
+  label_format: json     # "json" or "csv" -- one label file per image
+
+dataset:
+  n_images: 3000
+  val_ratio: 0.1         # fraction held out for validation
+  seed: 0
+
+# ---------------------------------------------------------------------------
+# Per-image RANDOMIZATION of parameters left UNDER-CONSTRAINED by calibration.
+# The calibration fit the physics (psf, haze, brightness, noise scale) but NOT
+# the object population or the degenerate gain/enf split. Randomizing these per
+# image makes the detector robust across the full plausible range instead of
+# overfitting one point estimate. (Each is sampled uniformly over its [lo, hi].)
+# ---------------------------------------------------------------------------
+randomize:
+  # In-focus GUV density (mean count / frame). Calibration chose ~15; real fields
+  # have more small faint GUVs, so cover sparse -> crowded and slightly exceed it.
+  guv_density: [10.0, 40.0]
+
+  # Lognormal sphere-diameter params, around the fitted values (~3.95 / ~0.86)
+  # but BIASED to include MORE small GUVs than the global-stat fit chose (real is
+  # small-dominated; the global fit under-weights the small end).
+  size_log_mean: [3.4, 4.0]      # <= fit -> smaller median diameter
+  size_log_sigma: [0.75, 1.05]   # >= fit -> wider spread, more small GUVs
+
+  # Focal-plane-cut fill factor -> the ring <-> disc continuum. This was NEVER
+  # constrained by calibration (a minority effect on global moments, hence pinned
+  # during the fit), so vary it widely so the detector sees rings through discs.
+  cut_axial_extent: [1.0, 8.0]
+
+  # gain & enf are DEGENERATE: only their product is constrained by the intensity
+  # statistics. Keep the product near the fitted value (gain_fit * enf_fit) with
+  # a small jitter, and vary the SPLIT via enf -> gain = product / enf. This lets
+  # the detector see the full plausible noise range without changing the
+  # calibrated effective noise scale.
+  enf: [1.0, 1.6]
+  product_jitter: [0.85, 1.20]   # per-image multiplier on the fitted gain*enf
+
+# ---------------------------------------------------------------------------
+# FIXED from calibration (these ARE constrained by the lipid statistics) and
+# therefore left at their base_config values, NOT randomized:
+#   psf.sigma, ring.brightness, ring.thickness, ring.rim_variation, all
+#   background/haze params (blob_*/dot_*/oof_amplitude), noise.offset,
+#   noise.read_noise, noise.optical_bg, aggregates.*, sensor.max_value.
+# ---------------------------------------------------------------------------

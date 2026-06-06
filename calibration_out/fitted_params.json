@@ -1,0 +1,30 @@
+{
+  "fitted_params": {
+    "psf.sigma": 2.83243287923332,
+    "ring.brightness": 197.50170597717366,
+    "ring.thickness": 4.196055909576104,
+    "noise.gain": 0.2163840156784216,
+    "noise.enf": 1.2330588785374488,
+    "noise.read_noise": 0.18704275393859032,
+    "noise.optical_bg": 15.935507362481344,
+    "noise.offset": 31.09524029948407,
+    "guvs.density": 14.820159810529681,
+    "guvs.sphere_diameter_log_mean": 3.949335805618772,
+    "guvs.sphere_diameter_log_sigma": 0.8560882035481796,
+    "background.oof_amplitude": 38.4581650247771,
+    "aggregates.amplitude": 298.07682308664596
+  },
+  "best_value": 0.5695540946195929,
+  "term_breakdown": {
+    "mean": 0.0017258884857752656,
+    "median": 0.00025247526146059997,
+    "p99": 0.006765815126377112,
+    "p999": 0.0006073639518803716,
+    "skewness": 0.030625407573594183,
+    "histogram_wasserstein": 0.3182761371135721,
+    "radial_psd": 0.14625958560583535,
+    "psd_low_band": 0.0650414215010979
+  },
+  "n_trials": 300,
+  "pinned_note": "cut.axial_extent and cut.offset_max_frac are PINNED (not fitted): global stats cannot constrain focal-plane-cut geometry. gain/enf are degenerate -- randomize over them at generation."
+}

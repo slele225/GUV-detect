@@ -1,0 +1,151 @@
+# =============================================================================
+# GUV forward-simulator default configuration
+# =============================================================================
+# Every parameter the simulator uses lives here. There are NO physics constants
+# or magic numbers hardcoded in src/. All sizing a user sees is in DIAMETER
+# (pixels); the code converts to radius internally.
+#
+# Parameters tagged [CALIBRATE] are placeholders awaiting calibration against
+# the real 561 nm lipid-channel images in data/. Their current values are
+# plausible starting points, not measured truth.
+# =============================================================================
+
+image:
+  size: 512          # output image is size x size, single channel (lipid / 561 nm)
+
+# -----------------------------------------------------------------------------
+# In-focus GUV population
+# -----------------------------------------------------------------------------
+guvs:
+  # Number of in-focus GUVs per frame. Drawn as Poisson(density) so frames vary
+  # naturally. Set a fixed integer via `count` to override (tests / previews).
+  # Centers are uniform over the full frame -- shapes may clip at edges, and
+  # overlaps are allowed. Both are realistic and intentional.
+  density: 30        # mean in-focus GUV count per frame (lambda of Poisson draw)
+  count: null        # if set (int), use exactly this many (overrides density)
+
+  # APPARENT-diameter bounds (px): the chord diameter seen in the image (after
+  # the focal-plane cut). Ground-truth diameters are guaranteed to fall in here.
+  d_min: 12          # [CALIBRATE] minimum apparent diameter (px)
+  d_max: 150         # [CALIBRATE] maximum apparent diameter (px)
+
+  # Size distribution of the TRUE sphere diameter (px). Real GUV populations are
+  # small-dominated with a long thin tail of rare large vesicles -- NOT uniform.
+  # We draw sphere_diameter = exp(Normal(log_mean, log_sigma)) (lognormal), then
+  # the focal-plane cut (see `cut`) reduces it to the apparent diameter, which is
+  # rejection-sampled into [d_min, d_max]. The shape below is CALIBRATE: it must
+  # be checked against the real apparent-size histogram.
+  size_dist: lognormal
+  sphere_diameter_log_mean: 3.7   # [CALIBRATE] mean of log-diameter (~e^3.7 = 40 px median)
+  sphere_diameter_log_sigma: 0.55 # [CALIBRATE] std of log-diameter (spread / tail length)
+  sample_max_attempts: 100        # rejection cap when forcing apparent into [d_min, d_max]
+
+# -----------------------------------------------------------------------------
+# Focal-plane cut geometry (rings vs. filled discs)
+# -----------------------------------------------------------------------------
+# The confocal plane slices each sphere at height h above its center. The
+# apparent radius is the chord radius sqrt(R^2 - h^2); the ring-vs-disc look
+# emerges from how far off-equator the cut is (see forward_model.py docstring).
+cut:
+  offset_max_frac: 1.0   # cut offset h ~ U(-1, 1) * this * R. 1.0 = uniform over
+                         # the whole sphere (mix of equatorial rings & polar
+                         # discs). Lower -> biased toward equatorial rings.
+  axial_extent: 4.0      # [CALIBRATE] confocal axial collection extent (px-equiv).
+                         # Sets how strongly off-equator cuts fill in: larger ->
+                         # more / brighter filled discs at a given apparent size.
+
+# -----------------------------------------------------------------------------
+# Membrane (ring/disc) appearance -- the optical model, in photon units
+# -----------------------------------------------------------------------------
+ring:
+  thickness: 2.0         # [CALIBRATE] radial membrane width (px, ~FWHM) before PSF.
+                         # FITTABLE: larger -> softer, lower-contrast rings (real
+                         # rings are soft, not crisp). Still thin enough that
+                         # equatorial cuts stay open rings.
+  brightness: 200.0      # [CALIBRATE] peak membrane signal in photons (pre-noise).
+  brightness_jitter: 0.4 # [CALIBRATE] fractional std of per-GUV brightness
+                         # (0 = all equally bright). Lognormal multiplier.
+  rim_variation: 0.4     # [CALIBRATE] around-the-rim intensity variation: 0 = a
+                         # uniform clean circle, ->1 = strongly broken/uneven rim
+                         # (sum of random angular harmonics). Real rings are uneven.
+  rim_modes: 3           # number of angular harmonics in the rim variation
+
+# -----------------------------------------------------------------------------
+# Point-spread function (in-focus microscope blur)
+# -----------------------------------------------------------------------------
+psf:
+  sigma: 1.2         # [CALIBRATE] Gaussian PSF std (px) for the in-focus layer.
+
+# -----------------------------------------------------------------------------
+# Structured, MULTI-SCALE out-of-focus background (GUVs above/below the plane)
+# -----------------------------------------------------------------------------
+# Soft, low-contrast blobs rendered BEHIND the in-focus GUVs -- the diffuse haze
+# in real fields and a dominant false-positive source. Real haze has structure
+# at ALL spatial scales, so this is a MIXTURE: blobs with per-object blur sigma
+# spanning a wide (small-heavy) range, plus a dense sub-population of small faint
+# near-in-focus dots for fine structure. Background ONLY: never in ground truth.
+#
+# `oof_amplitude` is the single GLOBAL haze level (the calibration-fitted knob);
+# everything else here sets the multi-scale SHAPE and is pinned (like the cut
+# geometry -- global stats constrain the overall level, not the fine shape).
+background:
+  # Master switch / total count:
+  #   null -> use the per-population Poisson densities below
+  #   0    -> disable the whole OOF layer (zero haze)
+  #   N>0  -> render exactly N objects total, split by the blob:dot density ratio
+  oof_count: null
+  oof_amplitude: 12.0        # [CALIBRATE] GLOBAL haze level (scales BOTH populations)
+  oof_amplitude_jitter: 0.5  # per-object amplitude variation (lognormal frac std)
+
+  # (a) Multi-scale blurred blobs: many small + a few large (small-heavy sigma).
+  blob_density: 40           # mean blob count per frame
+  blob_sigma_min: 2.0        # smallest blob blur sigma (px, near-in-focus)
+  blob_sigma_max: 40.0       # largest blob blur sigma (px, heavy out-of-focus)
+  blob_sigma_log: true       # log-uniform sigma -> many small, few large
+  blob_rel_amplitude: 1.0    # blob level relative to oof_amplitude
+
+  # (b) Fine structure: dense, small, faint, near-in-focus dots.
+  dot_density: 150           # mean dot count per frame (dense -> fine texture)
+  dot_sigma_min: 0.8         # dot blur sigma min (px)
+  dot_sigma_max: 2.5         # dot blur sigma max (px)
+  dot_sigma_log: false       # uniform over the small dot range
+  dot_rel_amplitude: 0.5     # dots fainter than blobs (relative to oof_amplitude)
+
+# -----------------------------------------------------------------------------
+# Saturated aggregate distractors (clumped lipid)
+# -----------------------------------------------------------------------------
+# Bright, irregular, high-amplitude blobs that saturate the sensor (clip at
+# sensor.max_value). A few overlapping jittered Gaussian lobes make them lumpy
+# rather than clean circles. These are DISTRACTORS ONLY: never in the ground
+# truth, so the detector learns to ignore bright junk and judge GUVs by shape.
+aggregates:
+  density: 2.0           # [CALIBRATE] mean aggregate count per frame
+  count: null            # if set (int), use exactly this many (overrides density)
+  amplitude: 1500.0      # [CALIBRATE] peak signal in photons -- well above ring
+                         # brightness so it clips flat (saturates)
+  amplitude_jitter: 0.5  # fractional std of per-aggregate amplitude (lognormal)
+  lobe_sigma_min: 4.0    # min Gaussian lobe std (px)
+  lobe_sigma_max: 12.0   # max Gaussian lobe std (px)
+  n_lobes: 3             # overlapping lobes per aggregate (-> irregular shape)
+  lobe_jitter: 6.0       # positional spread of lobes about the center (px)
+
+# -----------------------------------------------------------------------------
+# Sensor / digitization
+# -----------------------------------------------------------------------------
+sensor:
+  max_value: 255         # sensor full-scale (8-bit). Values clip here
+                         # (saturation); set null to disable the upper clip.
+
+# -----------------------------------------------------------------------------
+# PMT-style detector noise model (applied in this order)
+# -----------------------------------------------------------------------------
+# Stages: optical_bg floor -> shot noise -> gain -> enf -> read_noise -> offset.
+# Setting all to their no-op values (optical_bg=0, shot_noise=false, gain=1,
+# enf=1, read_noise=0, offset=0) yields a clean, noiseless image.
+noise:
+  optical_bg: 5.0    # [CALIBRATE] scalar background-photon floor (pre-shot-noise)
+  shot_noise: true   # Poisson photon shot noise (false -> deterministic render)
+  gain: 1.0          # [CALIBRATE] PMT gain (counts per photo-electron)
+  enf: 1.2           # [CALIBRATE] excess noise factor (>=1; 1 = no excess noise)
+  read_noise: 2.0    # [CALIBRATE] Gaussian read-noise std (counts)
+  offset: 100.0      # [CALIBRATE] constant ADC offset / pedestal (counts)

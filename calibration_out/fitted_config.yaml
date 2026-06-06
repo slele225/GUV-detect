@@ -1,0 +1,54 @@
+image:
+  size: 512
+guvs:
+  density: 14.820159810529681
+  count: null
+  d_min: 12
+  d_max: 150
+  size_dist: lognormal
+  sphere_diameter_log_mean: 3.949335805618772
+  sphere_diameter_log_sigma: 0.8560882035481796
+  sample_max_attempts: 100
+cut:
+  offset_max_frac: 1.0
+  axial_extent: 4.0
+ring:
+  thickness: 4.196055909576104
+  brightness: 197.50170597717366
+  brightness_jitter: 0.4
+  rim_variation: 0.4
+  rim_modes: 3
+psf:
+  sigma: 2.83243287923332
+background:
+  oof_count: null
+  oof_amplitude: 38.4581650247771
+  oof_amplitude_jitter: 0.5
+  blob_density: 40
+  blob_sigma_min: 2.0
+  blob_sigma_max: 40.0
+  blob_sigma_log: true
+  blob_rel_amplitude: 1.0
+  dot_density: 150
+  dot_sigma_min: 0.8
+  dot_sigma_max: 2.5
+  dot_sigma_log: false
+  dot_rel_amplitude: 0.5
+aggregates:
+  density: 2.0
+  count: null
+  amplitude: 298.07682308664596
+  amplitude_jitter: 0.5
+  lobe_sigma_min: 4.0
+  lobe_sigma_max: 12.0
+  n_lobes: 3
+  lobe_jitter: 6.0
+sensor:
+  max_value: 255
+noise:
+  optical_bg: 15.935507362481344
+  shot_noise: true
+  gain: 0.2163840156784216
+  enf: 1.2330588785374488
+  read_noise: 0.18704275393859032
+  offset: 31.09524029948407

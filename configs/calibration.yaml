@@ -1,0 +1,111 @@
+# =============================================================================
+# Calibration configuration (REAL run)
+# =============================================================================
+# Detection-free moment matching: fit the forward simulator's parameters so that
+# global statistics of simulated 512x512 lipid images match those of the real
+# 561 nm images in data/. See src/calibrate.py for the method.
+#
+# For a quick local test use configs/calibration_smoke.yaml (few trials). This
+# file is the real run (many trials) -- expect minutes, not seconds.
+# =============================================================================
+
+base_sim_config: configs/sim_default.yaml   # simulator defaults (pinned params come from here)
+
+# -----------------------------------------------------------------------------
+# Real images (the calibration target)
+# -----------------------------------------------------------------------------
+data:
+  dir: data
+  glob: "*.tif*"
+  channel: 1        # 561 nm lipid channel (used only if a file is multi-channel;
+                    # the data/ files here are already single-channel 512x512)
+  size: 512
+  crop: center      # center-crop to size if larger (no-op for 512x512 inputs)
+  max_value: 255    # uint8 full-scale -> images normalized to [0, 1]
+  limit: null       # optionally cap the number of real images used
+
+# -----------------------------------------------------------------------------
+# Optuna search
+# -----------------------------------------------------------------------------
+optuna:
+  n_trials: 300
+  n_sim_images: 8   # simulated images per trial, averaged (reduces stat noise)
+  seed: 0
+
+# -----------------------------------------------------------------------------
+# Summary-statistics options
+# -----------------------------------------------------------------------------
+statistics:
+  hist_bins: 64
+
+# -----------------------------------------------------------------------------
+# Parameters Optuna FITS (dotted config path -> search range)
+# -----------------------------------------------------------------------------
+# Only parameters that the GLOBAL lipid statistics actually constrain. Ranges are
+# in simulator units (counts on the [0, 255] sensor scale, or photons pre-gain).
+fit:
+  psf.sigma:                        {low: 0.5, high: 3.0}    # in-focus blur
+  ring.brightness:                  {low: 10.0, high: 300.0} # membrane signal (photons)
+  ring.thickness:                   {low: 0.8, high: 6.0}    # membrane width -> ring softness
+  noise.gain:                       {low: 0.2, high: 5.0, log: true}   # degenerate w/ enf
+  noise.enf:                        {low: 1.0, high: 2.0}    # excess noise (degenerate w/ gain)
+  noise.read_noise:                 {low: 0.0, high: 10.0}   # read-noise std (counts)
+  noise.optical_bg:                 {low: 0.0, high: 30.0}   # background-photon floor
+  noise.offset:                     {low: 0.0, high: 80.0}   # ADC pedestal (sets baseline)
+  guvs.density:                     {low: 1.0, high: 60.0}   # in-focus GUV count/frame
+  guvs.sphere_diameter_log_mean:    {low: 2.5, high: 4.5}    # lognormal size: log-mean
+  guvs.sphere_diameter_log_sigma:   {low: 0.2, high: 0.9}    # lognormal size: log-sigma
+  background.oof_amplitude:         {low: 0.0, high: 40.0}   # out-of-focus haze level
+  aggregates.amplitude:             {low: 200.0, high: 3000.0, log: true}  # saturated junk
+
+# -----------------------------------------------------------------------------
+# Parameters PINNED (NOT fitted) -- documented here, values come from base config
+# -----------------------------------------------------------------------------
+# Global image statistics cannot constrain the focal-plane-cut geometry: the
+# ring-vs-disc ratio is a minority effect on whole-image moments. Fitting these
+# would let Optuna trade them off against brightness/noise and learn nonsense.
+# They stay at their hand-tuned values in configs/sim_default.yaml:
+pinned:
+  - cut.axial_extent       # how strongly off-equator cuts fill into discs
+  - cut.offset_max_frac    # cut-offset distribution (uniform over the sphere)
+# Other unlisted params (ring.thickness, brightness_jitter, oof sizes/blur,
+# aggregate sizes/density, sensor.max_value, ...) are likewise held at base
+# values; add them to `fit` only if you have a reason to believe the global
+# statistics constrain them.
+
+# -----------------------------------------------------------------------------
+# Discrepancy terms (each {enabled, weight}); see src/discrepancy.py
+# -----------------------------------------------------------------------------
+# mean/quantiles/skewness are relative squared errors (dimensionless, shared
+# scale). histogram_wasserstein is a small absolute distance -> larger weight.
+#
+# Weights tuned to fix a haze-vs-ring ratio problem: real images are
+# haze-dominated with subtle rings, but the optimizer was matching the mean with
+# a flat offset/optical_bg pedestal and zeroing the structured haze
+# (oof_amplitude railed at its MINIMUM), while bright rings/aggregates satisfied
+# the p99/p99.9 quantile terms. So we emphasize the haze-dominated BULK (mean +
+# median + histogram + low-frequency PSD) and de-emphasize the bright TAIL
+# (p99/p99.9) so bright ring pixels are no longer the cheap way to win.
+#
+# `median` and `psd_low_band` are HAZE-SENSITIVE: only the haze can satisfy them,
+# so the optimizer cannot trade haze away to sharpen rings (median = background
+# level; psd_low_band = power at large spatial scales).
+discrepancy:
+  terms:
+    mean:                  {enabled: true, weight: 3.0}
+    median:                {enabled: true, weight: 3.0}
+    p99:                   {enabled: true, weight: 0.3}
+    p999:                  {enabled: true, weight: 0.3}
+    skewness:              {enabled: true, weight: 0.5}
+    histogram_wasserstein: {enabled: true, weight: 100.0}
+    radial_psd:            {enabled: true, weight: 1.0}
+    psd_low_band:          {enabled: true, weight: 3.0, max_bin: 8}
+
+# -----------------------------------------------------------------------------
+# Outputs
+# -----------------------------------------------------------------------------
+output:
+  dir: calibration_out
+  fitted_json: fitted_params.json
+  fitted_config: fitted_config.yaml
+  comparison_plot: comparison.png
