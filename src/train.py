@@ -37,13 +37,25 @@ from src.model import GUVNet  # noqa: E402
 # --------------------------------------------------------------------------- #
 # Losses
 # --------------------------------------------------------------------------- #
-def focal_loss(pred: torch.Tensor, gt: torch.Tensor, alpha: float = 2.0, beta: float = 4.0) -> torch.Tensor:
+_FOCAL_EPS = 1e-4
+
+
+def focal_loss(pred: torch.Tensor, gt: torch.Tensor, alpha: float = 2.0,
+               beta: float = 4.0, eps: float = _FOCAL_EPS) -> torch.Tensor:
     """CenterNet penalty-reduced focal loss on a [0,1] heatmap.
 
     Positives are exact GT centers (gt == 1); everything else is negative, with
     the penalty down-weighted near a center by (1 - gt)**beta. Normalized by the
     number of positives.
+
+    Numerical stability (this is the classic focal-loss-from-scratch NaN):
+      - compute in float32 (fp16 log/exp/pow under AMP is the usual NaN source);
+      - clamp the predicted probabilities to [eps, 1 - eps] so log() never sees
+        exactly 0 or 1.
     """
+    pred = pred.float().clamp(eps, 1.0 - eps)  # fp32 + clamp before any log()
+    gt = gt.float()
+
     pos = gt.eq(1).float()
     neg = 1.0 - pos
     neg_weights = torch.pow(1.0 - gt, beta)
@@ -60,7 +72,10 @@ def focal_loss(pred: torch.Tensor, gt: torch.Tensor, alpha: float = 2.0, beta: f
 
 
 def radius_l1(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """L1 on radius, supervised ONLY where mask == 1 (true centers)."""
+    """L1 on radius, supervised ONLY where mask == 1 (true centers). fp32."""
+    pred = pred.float()
+    target = target.float()
+    mask = mask.float()
     loss = (torch.abs(pred - target) * mask).sum()
     return loss / (mask.sum() + 1e-4)
 
@@ -123,6 +138,7 @@ def run_epoch(model, loader, cfg, device, optimizer=None, scheduler=None, scaler
     hm_w = cfg["loss"]["heatmap_weight"]
     r_w = cfg["loss"]["radius_weight"]
     use_amp = cfg["train"]["amp"] and device.startswith("cuda")
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
 
     totals = {"loss": 0.0, "hm": 0.0, "radius": 0.0}
     n = 0
@@ -132,23 +148,45 @@ def run_epoch(model, loader, cfg, device, optimizer=None, scheduler=None, scaler
         r_gt = batch["radius_map"].to(device, non_blocking=True)
         mask = batch["reg_mask"].to(device, non_blocking=True)
 
-        with torch.set_grad_enabled(train), torch.autocast("cuda", enabled=use_amp):
-            out = model(img)
-            l_hm = focal_loss(out["hm"], hm_gt, cfg["loss"]["focal_alpha"], cfg["loss"]["focal_beta"])
-            l_r = radius_l1(out["radius"], r_gt, mask)
-            loss = hm_w * l_hm + r_w * l_r
+        with torch.set_grad_enabled(train):
+            # Forward (and backward) use AMP; the LOSS math is forced to float32.
+            with torch.autocast(device_type, enabled=use_amp):
+                out = model(img)
+            with torch.autocast(device_type, enabled=False):
+                hm_pred = out["hm"].float()
+                r_pred = out["radius"].float()
+                l_hm = focal_loss(hm_pred, hm_gt.float(),
+                                  cfg["loss"]["focal_alpha"], cfg["loss"]["focal_beta"])
+                l_r = radius_l1(r_pred, r_gt.float(), mask.float())
+                loss = hm_w * l_hm + r_w * l_r
 
         if train:
+            # Guard: never let a single non-finite batch poison the weights.
+            if not torch.isfinite(loss):
+                print(f"WARNING: non-finite loss (hm={l_hm.item()}, radius={l_r.item()}); "
+                      f"skipping optimizer step for this batch")
+                optimizer.zero_grad(set_to_none=True)
+                continue
+
             optimizer.zero_grad(set_to_none=True)
             if use_amp:
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)  # unscale so clipping sees real grads
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                prev_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
+                # If inf grads were found, scaler skips the step and lowers the
+                # scale -> don't advance the scheduler (avoids the "scheduler
+                # before optimizer" warning).
+                stepped = scaler.get_scale() >= prev_scale
             else:
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+                stepped = True
+            if scheduler is not None and stepped:
+                scheduler.step()  # AFTER a real optimizer.step()
 
         bs = img.size(0)
         totals["loss"] += loss.item() * bs

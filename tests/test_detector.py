@@ -17,6 +17,7 @@ from src.detect import decode, nms_by_distance
 from src.metrics import aggregate, match_detections, precision_recall_f1
 from src.model import GUVNet
 from src.normalize import load_normalized, to_unit
+from src.train import focal_loss, radius_l1
 
 
 # --------------------------------------------------------------------------- #
@@ -133,7 +134,31 @@ def test_train_and_detect_share_normalization(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# (5) Model forward shapes
+# (5) Focal-loss numerical stability (regression for the from-scratch NaN)
+# --------------------------------------------------------------------------- #
+def test_focal_loss_finite_at_probability_edges():
+    # Predictions exactly at 0 and 1 must not yield NaN/Inf (clamped before log).
+    pred = torch.tensor([0.0, 1.0, 1e-12, 1.0 - 1e-12]).reshape(1, 1, 2, 2)
+    gt = torch.tensor([1.0, 0.0, 0.0, 0.0]).reshape(1, 1, 2, 2)
+    loss = focal_loss(pred, gt)
+    assert torch.isfinite(loss)
+
+
+def test_focal_loss_finite_with_fp16_inputs():
+    # Under AMP the heatmap may arrive as float16; the loss must internally use
+    # float32 and stay finite.
+    pred = torch.rand(1, 1, 8, 8).clamp(0, 1).half()
+    gt = torch.zeros(1, 1, 8, 8)
+    gt[0, 0, 3, 3] = 1.0
+    loss = focal_loss(pred, gt.half())
+    assert torch.isfinite(loss)
+    # Radius L1 also stable with fp16 inputs.
+    rl = radius_l1(torch.rand(1, 1, 8, 8).half(), gt.half(), gt.half())
+    assert torch.isfinite(rl)
+
+
+# --------------------------------------------------------------------------- #
+# (6) Model forward shapes
 # --------------------------------------------------------------------------- #
 def test_model_forward_shapes_full_res():
     model = GUVNet(in_ch=1, base=8, depth=3, out_stride=1).eval()
