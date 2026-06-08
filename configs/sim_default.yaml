@@ -19,10 +19,26 @@ image:
 guvs:
   # Number of in-focus GUVs per frame. Drawn as Poisson(density) so frames vary
   # naturally. Set a fixed integer via `count` to override (tests / previews).
-  # Centers are uniform over the full frame -- shapes may clip at edges, and
-  # overlaps are allowed. Both are realistic and intentional.
+  # Centers may clip at the frame edges (realistic, intentional). Placement uses
+  # the soft-exclusion model below so overlap is DECOUPLED from density.
   density: 30        # mean in-focus GUV count per frame (lambda of Poisson draw)
   count: null        # if set (int), use exactly this many (overrides density)
+
+  # --- Soft-exclusion placement (overlap decoupled from density) --------------
+  # Real GUVs are physical objects that mostly exclude one another (pack/tile)
+  # rather than pile up, with an occasional nested/overlapping pair. So instead of
+  # purely uniform centers, each GUV rejects candidate positions that fall too
+  # close to already-placed GUVs, with a small minority allowed to overlap anyway.
+  # This lets density fill a frame by PACKING, not by piling rings on top of each
+  # other. (`min_separation_factor: 0` disables exclusion -> old uniform placement.)
+  min_separation_factor: 0.9   # required center gap = factor * (r_i + r_j), apparent
+                               # radii. 1 = just-tangent (no overlap); <1 allows some
+                               # overlap; >1 forces a gap. HIGHER = more spread out.
+  allowed_overlap_fraction: 0.12  # probability a GUV ignores the rule and may be
+                                  # placed overlapping/nested (keeps a realistic
+                                  # minority). HIGHER = more overlapping pairs.
+  placement_max_attempts: 30   # rejection-sampling cap per GUV; on exhaustion the
+                               # last candidate is kept (crowded frames stay finite).
 
   # APPARENT-diameter bounds (px): the chord diameter seen in the image (after
   # the focal-plane cut). Ground-truth diameters are guaranteed to fall in here.

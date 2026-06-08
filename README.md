@@ -53,9 +53,12 @@ src/       forward_model.py — the simulator (simulate_image / simulate_batch)
 scripts/   preview_synthetic.py — render preview grids to a PNG
            preview_dataset.py — overlay GT labels on generated images
            detect_real.py — run the detector on real images (transfer check)
+           sweep_thresholds.py — run detect_real.py at several thresholds
 run_all.sh — generate (PNG) -> train -> evaluate (H100)
 tests/     pytest suites for simulator, calibration, dataset, and detector
 data/      real .tif/.tiff microscope images (DO NOT MODIFY)
+models/    trained checkpoint(s): models/best.pt (gitignored; dir kept)
+results/   real-image inference outputs: results/thresh_<value>/ (gitignored)
 ```
 
 ## Setup
@@ -134,12 +137,26 @@ full list and rationale.
 Generate a labeled training set from the calibrated model:
 
 ```bash
-# Generates N images (configs/dataset.yaml, default 3000) -> dataset/
-uv run python src/generate_dataset.py --config configs/dataset.yaml
+# Generates N images (configs/dataset.yaml) -> dataset/, parallel across CPU
+# cores (--n-workers defaults to os.cpu_count(); use 1 to run serially).
+uv run python src/generate_dataset.py --config configs/dataset.yaml --n-workers 16
 
-# Overlay the ground-truth labels to verify them visually.
+# Eyeball the size-mixture + density distribution on ~12 fresh images BEFORE a
+# full regen (generates them on the fly at the current config settings):
+uv run python scripts/preview_dataset.py --generate 12
+
+# Or overlay the ground-truth labels on an already-generated dataset.
 uv run python scripts/preview_dataset.py
 ```
+
+**Parallel generation.** Each image is independent pure-numpy CPU work, so
+generation fans out over a `multiprocessing.Pool` of **`spawn`** workers, each
+pinned to **single-threaded** BLAS (a Pool initializer sets
+`OMP_/MKL_/OPENBLAS_NUM_THREADS=1` and numpy is imported lazily in the worker so
+that takes effect first — otherwise the per-worker BLAS thread pools
+oversubscribe the cores and it runs *slower*). Per-image seeding is **by image
+index**, never by worker, so the output is **byte-identical** to a serial run —
+only speed changes.
 
 Output under `dataset/`: `images/{train,val}/<id>.npy` (or `.png`),
 `labels/{train,val}/<id>.json` (or `.csv`) with each in-focus GUV as
@@ -151,11 +168,31 @@ learns to ignore them and judge by shape.
 
 **Per-image randomization of the under-constrained parameters** (calibration
 fixed the physics, not the population or the degenerate noise split): GUV density
-(sparse→crowded), the lognormal size params (biased toward more small GUVs),
+over `[10, 150]` (sparse→very crowded; real fields hold ~40–80, floor kept at 10
+so sparse fields are still seen, ceiling at 150 to fill the densest),
 `cut.axial_extent` (the full ring↔disc continuum), and `gain`/`enf` jointly
-(product held near the fitted value, split varied). Everything calibration
-*did* constrain stays fixed at the `fitted_config.yaml` values. All ranges, and
-the randomized-vs-fixed split, live in `configs/dataset.yaml`.
+(product held near the fitted value, split varied). Everything calibration *did*
+constrain stays fixed at the `fitted_config.yaml` values. All ranges, and the
+randomized-vs-fixed split, live in `configs/dataset.yaml`.
+
+**Soft-exclusion GUV placement** (a *population* change, distinct from physics):
+overlap is decoupled from density. Real GUVs mostly exclude one another
+(pack/tile), so each GUV rejects candidate centers closer than
+`min_separation_factor * (r_i + r_j)` to an already-placed GUV, with a minority
+(`allowed_overlap_fraction`) allowed to overlap/nest anyway. This lets the raised
+density fill crowded frames by packing instead of piling overlapping rings. Knobs
+are in `configs/dataset.yaml` `placement:` (defaults `min_separation_factor: 0.9`,
+`allowed_overlap_fraction: 0.12`); `min_separation_factor: 0` recovers uniform
+placement.
+
+**Sphere-diameter size is a two-component mixture** (a deliberate *population*
+change, distinct from the calibrated physics): a single lognormal can't both pile
+mass at the small end *and* keep a realistic minority of large vesicles, so each
+GUV is drawn from a SMALL or LARGE lognormal component (`small_fraction` picks
+which). Five fixed knobs in `configs/dataset.yaml` `size_distribution:`
+(`small_fraction`, `small/large_log_mean`, `small/large_log_sigma`) are meant to
+be tuned by eye via `preview_dataset.py --generate 12`. Calibration still uses
+the single lognormal — only generation uses the mixture.
 
 > **Note:** the dataset is generated as **uint8 PNG** (`output.image_format: png`)
 > so it matches the real 512×512 uint8 images. Training and inference share one
@@ -194,23 +231,49 @@ uv run python src/detect.py   --checkpoint runs/guvnet/best.pt --image <png|tif>
 
 All hyperparameters live in `configs/train.yaml` and `configs/eval.yaml`.
 
-### Real-image transfer check
+### Real-image inference experiments
+
+The trained model lives at **`models/best.pt`** — the default checkpoint for both
+scripts below, so you never pass `--checkpoint`. (`models/` is gitignored because
+the `.pt` is large; the directory is kept via `models/.gitkeep`. Set up locally
+with `uv sync` first.)
 
 Qualitatively check how the synthetic-trained detector transfers to the real
-images (no ground truth — eyeball it):
+images (no ground truth — eyeball it). Output **auto-names by threshold** so runs
+never overwrite each other:
 
-```bash
-uv run python scripts/detect_real.py --checkpoint runs/guvnet/best.pt --images data
-# tune the threshold / NMS without retraining:
-uv run python scripts/detect_real.py --threshold 0.4 --nms-dist 8 --images data
+```
+results/
+  thresh_0.10/   <- one run's PNGs (per-image 3-panel + _grid.png)
+  thresh_0.15/
+  ...
 ```
 
-For each real image it loads via the **same** `[0,1]` normalization as training,
-runs the identical `detect.py` pipeline, and saves a 3-panel PNG to
-`detect_real_out/` — raw image | image + predicted circles/centers | predicted
-center heatmap — titled with the filename and detection count, plus an overview
-`_grid.png`. CLI flags: `--checkpoint`, `--images`, `--out`, `--threshold`,
-`--nms-dist`, `--channel`, `--limit`, `--device`.
+**Single threshold** (default checkpoint `models/best.pt`, images `data/`):
+
+```bash
+uv run python scripts/detect_real.py --threshold 0.15      # -> results/thresh_0.15/
+uv run python scripts/detect_real.py --threshold 0.30 --nms-dist 8
+```
+
+**Sweep several thresholds in one invocation** — each to its own
+`results/thresh_<value>/`:
+
+```bash
+# default sweep [0.10, 0.15, 0.20, 0.25, 0.30]
+uv run python scripts/sweep_thresholds.py
+
+# custom list / inputs
+uv run python scripts/sweep_thresholds.py --thresholds 0.1 0.2 0.3 --nms-dist 8
+```
+
+Each per-image PNG is 3 panels — raw image | image + predicted circles/centers |
+predicted center heatmap — titled with the filename and detection count, plus an
+overview `_grid.png`. `detect_real.py` loads via the **same** `[0,1]`
+normalization as training and runs the identical `detect.py` pipeline. Flags:
+`--checkpoint`, `--images`, `--out` (override the auto-named folder), `--threshold`,
+`--nms-dist`, `--channel`, `--limit`, `--device` (add `--device cpu` if no GPU).
+`results/` is gitignored (kept via `.gitkeep`).
 
 ## Conventions
 

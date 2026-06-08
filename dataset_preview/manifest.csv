@@ -1,0 +1,13 @@
+id,split,image,label,n_guvs
+000000,train,images/train/000000.png,labels/train/000000.json,132
+000001,train,images/train/000001.png,labels/train/000001.json,103
+000002,train,images/train/000002.png,labels/train/000002.json,17
+000003,train,images/train/000003.png,labels/train/000003.json,107
+000004,train,images/train/000004.png,labels/train/000004.json,128
+000005,train,images/train/000005.png,labels/train/000005.json,31
+000006,train,images/train/000006.png,labels/train/000006.json,31
+000007,train,images/train/000007.png,labels/train/000007.json,68
+000008,train,images/train/000008.png,labels/train/000008.json,35
+000009,train,images/train/000009.png,labels/train/000009.json,72
+000010,train,images/train/000010.png,labels/train/000010.json,20
+000011,train,images/train/000011.png,labels/train/000011.json,100

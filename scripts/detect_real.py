@@ -9,10 +9,17 @@ training and detect.py (src.normalize.load_normalized), runs the identical
 inference pipeline (heatmap -> peak-pick -> NMS -> (x, y, radius)), and saves a
 3-panel PNG: raw image | image + predicted circles/centers | predicted heatmap.
 
-    uv run python scripts/detect_real.py --checkpoint runs/guvnet/best.pt
-    uv run python scripts/detect_real.py --images data --threshold 0.4 --nms-dist 8
+Defaults: checkpoint = models/best.pt, images = data/. Output auto-names by
+threshold to results/thresh_<value>/ so runs at different thresholds never
+overwrite each other (override with --out).
 
-Tune --threshold / --nms-dist here to inspect transfer WITHOUT retraining.
+    uv run python scripts/detect_real.py                       # thresh 0.30 -> results/thresh_0.30/
+    uv run python scripts/detect_real.py --threshold 0.15      # -> results/thresh_0.15/
+    uv run python scripts/detect_real.py --threshold 0.4 --nms-dist 8 --out custom/dir
+
+For a one-shot comparison across several thresholds, use
+scripts/sweep_thresholds.py. Tune --threshold / --nms-dist to inspect transfer
+WITHOUT retraining.
 """
 
 import argparse
@@ -111,10 +118,13 @@ def main():
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", default=str(repo_root / "runs" / "guvnet" / "best.pt"))
+    parser.add_argument("--checkpoint", default=str(repo_root / "models" / "best.pt"),
+                        help="trained model (default: models/best.pt)")
     parser.add_argument("--images", default=str(repo_root / "data"),
                         help="folder of real images (default: data/)")
-    parser.add_argument("--out", default=str(repo_root / "detect_real_out"))
+    parser.add_argument("--out", default=None,
+                        help="output folder. Default: results/thresh_<value>/ (auto-named by "
+                             "--threshold) so runs at different thresholds never overwrite.")
     parser.add_argument("--threshold", type=float, default=0.3, help="heatmap peak threshold")
     parser.add_argument("--nms-dist", type=float, default=6.0, help="NMS center distance (px)")
     parser.add_argument("--channel", type=int, default=1, help="lipid channel if multi-channel")
@@ -137,7 +147,9 @@ def main():
 
     model = load_model(args.checkpoint, device=device)
     down_ratio = getattr(model, "out_stride", 1)
-    out_dir = Path(args.out)
+    # Default convention: results/thresh_<value>/ so different thresholds never
+    # overwrite each other. An explicit --out always wins.
+    out_dir = Path(args.out) if args.out else (repo_root / "results" / f"thresh_{args.threshold:.2f}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Detecting on {len(paths)} real images (threshold={args.threshold}, "

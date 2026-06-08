@@ -16,9 +16,18 @@ calibration_out_smoke/
 
 # Generated synthetic dataset
 dataset/
+dataset_preview/        # scripts/preview_dataset.py --generate output
 
 # Training runs (checkpoints, per-epoch viz)
 runs/
 
 # Real-image transfer-check outputs
 detect_real_out/
+
+# Model checkpoints (large; keep the directory via .gitkeep)
+models/*
+!models/.gitkeep
+
+# Inference experiment outputs (results/thresh_<value>/ per run)
+results/*
+!results/.gitkeep

@@ -30,19 +30,38 @@ def base_cfg():
     return load_config(SIM_CONFIG)
 
 
-def _ds_cfg(n_images=6, val_ratio=0.0, density=(10.0, 40.0)):
+def _size_cfg():
+    return {
+        "size_dist": "mixture",
+        "small_fraction": 0.72,
+        "small_log_mean": 3.40,
+        "small_log_sigma": 0.45,
+        "large_log_mean": 4.60,
+        "large_log_sigma": 0.35,
+    }
+
+
+def _place_cfg():
+    return {
+        "min_separation_factor": 0.9,
+        "allowed_overlap_fraction": 0.12,
+        "placement_max_attempts": 30,
+    }
+
+
+def _ds_cfg(n_images=6, val_ratio=0.0, density=(10.0, 150.0)):
     return {
         "base_config": "configs/sim_default.yaml",
         "output": {"dir": "unused", "image_format": "npy", "label_format": "json"},
         "dataset": {"n_images": n_images, "val_ratio": val_ratio, "seed": 0},
         "randomize": {
             "guv_density": list(density),
-            "size_log_mean": [3.4, 4.0],
-            "size_log_sigma": [0.75, 1.05],
             "cut_axial_extent": [1.0, 8.0],
             "enf": [1.0, 1.6],
             "product_jitter": [0.85, 1.20],
         },
+        "size_distribution": _size_cfg(),
+        "placement": _place_cfg(),
     }
 
 
@@ -121,10 +140,11 @@ def test_gain_enf_product_preserved_split_varies(base_cfg):
     base_product = base["noise"]["gain"] * base["noise"]["enf"]
     rand = _ds_cfg()["randomize"]
 
+    size = _size_cfg()
     enfs, products = [], []
     for i in range(40):
         rng = np.random.default_rng(i)
-        cfg = build_image_config(base, rand, rng)
+        cfg = build_image_config(base, rand, size, rng)
         enfs.append(cfg["noise"]["enf"])
         products.append(cfg["noise"]["gain"] * cfg["noise"]["enf"])
 
@@ -136,9 +156,17 @@ def test_gain_enf_product_preserved_split_varies(base_cfg):
 
 def test_randomized_params_within_ranges(base_cfg):
     rand = _ds_cfg()["randomize"]
+    size = _size_cfg()
+    place = _place_cfg()
     for i in range(50):
         rng = np.random.default_rng(100 + i)
-        cfg = build_image_config(copy.deepcopy(base_cfg), rand, rng)
+        cfg = build_image_config(copy.deepcopy(base_cfg), rand, size, rng, place_cfg=place)
         assert rand["guv_density"][0] <= cfg["guvs"]["density"] <= rand["guv_density"][1]
         assert rand["cut_axial_extent"][0] <= cfg["cut"]["axial_extent"] <= rand["cut_axial_extent"][1]
         assert cfg["guvs"]["count"] is None
+        # The mixture knobs are copied into the simulator config unchanged.
+        assert cfg["guvs"]["size_dist"] == "mixture"
+        assert cfg["guvs"]["small_fraction"] == size["small_fraction"]
+        # The soft-exclusion placement knobs are injected into the guv config.
+        assert cfg["guvs"]["min_separation_factor"] == place["min_separation_factor"]
+        assert cfg["guvs"]["allowed_overlap_fraction"] == place["allowed_overlap_fraction"]

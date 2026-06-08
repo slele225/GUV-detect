@@ -41,12 +41,17 @@ scripts/preview_synthetic.py  Renders preview grids (crowded fields, ring/disc
                               demo, size sweep) -> PNG.
 scripts/preview_dataset.py    Overlays GT labels on generated images -> PNG.
 scripts/detect_real.py        Runs detector on real images -> 3-panel PNGs.
+scripts/sweep_thresholds.py   Runs detect_real.py at a list of thresholds.
 run_all.sh                    generate (PNG) -> train -> evaluate (H100).
 tests/test_forward_model.py   simulator pytest suite.
 tests/test_calibration.py     statistics + discrepancy pytest suite.
 tests/test_generate_dataset.py  dataset-generator pytest suite.
 tests/test_detector.py        targets / decode / metrics / normalization suite.
 data/                         Real .tif/.tiff stacks. DO NOT TOUCH.
+models/                       Trained checkpoint(s); models/best.pt (gitignored,
+                              dir kept via .gitkeep).
+results/                      Inference experiment outputs, results/thresh_<value>/
+                              per run (gitignored, dir kept via .gitkeep).
 previews/                     Generated preview PNGs (gitignored output).
 calibration_out[_smoke]/      Generated calibration outputs (gitignored).
 dataset/                      Generated synthetic dataset (gitignored output).
@@ -81,8 +86,19 @@ The simulator (`src/forward_model.py`) renders one 512×512 single-channel
 1. **In-focus GUV population** (`_sample_guvs`)
    - Count: `Poisson(density)`, or exactly `count` if set (deterministic; used
      by tests/previews).
-   - Center: **uniform over the full frame.** Shapes near the border clip off
-     the image, and GUVs may overlap — both kept on purpose, they are realistic.
+   - Center: **soft-exclusion (minimum-separation) placement** — overlap is
+     **decoupled from density**. Real GUVs mostly exclude one another (pack/tile)
+     rather than pile up, so each candidate center is rejected if it falls closer
+     than `min_separation_factor * (r_i + r_j)` (apparent radii) to an
+     already-placed GUV, via rejection sampling capped at `placement_max_attempts`
+     (last candidate kept on exhaustion, so crowded frames stay finite). A
+     minority — probability `allowed_overlap_fraction` per GUV — **skips the rule**
+     so genuinely overlapping / nested cases are still represented. This lets
+     density fill a frame by **packing** instead of by overlapping. Shapes near
+     the border still clip off the image (realistic, intentional).
+     `min_separation_factor: 0` recovers the old uniform placement. The knobs live
+     in `guvs.*` (`configs/sim_default.yaml`); generation overrides them from
+     `configs/dataset.yaml` `placement:`.
    - **Size distribution** (feature 2): the **true sphere diameter** is drawn
      **lognormal** (`size_dist: lognormal`, params `sphere_diameter_log_mean` /
      `_log_sigma`), which is small-dominated with a long thin tail — matching
@@ -91,6 +107,10 @@ The simulator (`src/forward_model.py`) renders one 512×512 single-channel
      **rejection-sampled** into `[d_min, d_max]` so labels stay in range while
      the underlying sizes/cuts stay physical. The distribution shape is a
      `[CALIBRATE]` placeholder to check against the real apparent-size histogram.
+     `_sample_sphere_diameter` also supports `size_dist: mixture` — a
+     two-component (small + large) lognormal mixture used by **dataset
+     generation** to better cover both ends; see the dataset section. Calibration
+     keeps the single `lognormal`.
 
 2. **Focal-plane-cut model — rings AND filled discs** (feature 1;
    `_sample_one_guv`, `_render_guv`). *Assumption:* a GUV is a thin spherical
@@ -241,9 +261,24 @@ values are not meaningful. Tune ranges/weights in `configs/calibration.yaml`.
 `src/generate_dataset.py` turns the calibrated model into a labeled training set:
 
 ```bash
-uv run python src/generate_dataset.py --config configs/dataset.yaml
-uv run python scripts/preview_dataset.py    # overlay GT labels to verify them
+# Full regen, parallel across all CPU cores (default --n-workers = os.cpu_count()):
+uv run python src/generate_dataset.py --config configs/dataset.yaml --n-workers 16
+# Eyeball the size-mixture + density distribution on ~12 fresh images first:
+uv run python scripts/preview_dataset.py --generate 12
+uv run python scripts/preview_dataset.py    # or: overlay GT labels on an existing run
 ```
+
+**Parallel generation.** Generation is embarrassingly parallel (each image is
+independent pure-numpy CPU work). `--n-workers N` (default `os.cpu_count()`,
+`1` = serial) runs a `multiprocessing.Pool` of **`spawn`** workers, each a fresh
+interpreter pinned to **single-threaded** BLAS — a Pool *initializer* sets
+`OMP_/MKL_/OPENBLAS_NUM_THREADS=1` and numpy/forward-model imports are **lazy**
+(inside the per-image task) so those env vars take effect before numpy loads.
+Without this, N workers × N BLAS threads oversubscribe the cores and it gets
+*slower*. Seeding is **by image index** (`SeedSequence(seed).spawn(2)` →
+per-image child seeds), never by worker, so parallel output is **byte-identical**
+to serial — parallelism changes only speed and (manifest is re-sorted) not even
+order. The split ratio and per-image content are preserved exactly.
 
 Output layout under `output.dir` (default `dataset/`):
 ```
@@ -260,15 +295,48 @@ the generator never invents extra labels.)
 
 **Randomize the under-constrained, fix the constrained.** Calibration constrains
 the physics but not the object population or the degenerate gain/enf split, so
-those are sampled **per image** over ranges in `configs/dataset.yaml`:
-- `guvs.density` over a band (covers + slightly exceeds the real range);
-- the lognormal size params around the fitted values, **biased smaller** (real is
-  small-dominated; the global-stat fit under-weights the small end);
+those are sampled **per image** (uniform over `[lo, hi]`) in
+`configs/dataset.yaml` `randomize:`:
+- `guvs.density` over `[10, 150]` (uniform). Real fields hold ~40–80 GUVs; the
+  floor stays at **10** so the detector still sees sparse fields and won't
+  over-predict density on near-empty real regions, and the ceiling is **150** to
+  fill even the densest real fields. The soft-exclusion placement (below) means a
+  high density now packs the frame rather than piling overlapping rings;
 - `cut.axial_extent` over a wide range (the ring↔disc ratio was never
   constrained, so the detector should see the whole continuum);
 - `gain`/`enf` **jointly** — keep the product near the fitted value (with a small
   jitter), vary the split via `enf` (`gain = product/enf`), so the detector sees
   the full plausible noise range.
+
+**Sphere-diameter size = a two-component mixture (deliberate POPULATION change,
+NOT calibrated physics).** Calibration used a single lognormal, which cannot at
+once pile mass at the small end (real fields are small-dominated, which the
+global-moment fit under-weights) *and* keep a realistic minority of large
+vesicles reaching `d_max`. So generation replaces it with a mixture
+(`configs/dataset.yaml` `size_distribution:`, `guvs.size_dist: mixture` in
+`src/forward_model.py:_sample_sphere_diameter`): each GUV is independently the
+**SMALL** component with probability `small_fraction`, else the **LARGE**
+component, then drawn from that component's lognormal. Five fixed (un-randomized)
+knobs, meant to be tuned **by eye** against `scripts/preview_dataset.py
+--generate 12`: `small_fraction` (default `0.72`), `small_log_mean` (`3.40` →
+~30 px median), `small_log_sigma` (`0.45`), `large_log_mean` (`4.60` → ~100 px
+median), `large_log_sigma` (`0.35`, tail toward ~150 px). Values are SPHERE
+diameter (px); the focal-plane cut then reduces each to an **apparent** diameter
+rejection-sampled into `[d_min, d_max] = [12, 150]` (existing logic). The single
+`lognormal` path is unchanged, so **calibration is untouched**. The two
+components are deliberately **wide and overlapping** (`small_log_sigma 0.60`,
+`large_log_mean 4.40` / `large_log_sigma 0.50`) so the combined spread is
+**continuous** (smooth small-dominated falloff with real density at medium sizes)
+rather than two separate humps.
+
+**GUV placement = soft-exclusion (deliberate POPULATION change, NOT physics).**
+Generation also overrides the placement knobs via `configs/dataset.yaml`
+`placement:` (injected into `guvs.*` by `build_image_config`, recorded in
+`dataset_meta.json`): `min_separation_factor` (default `0.9`),
+`allowed_overlap_fraction` (default `0.12`), `placement_max_attempts` (`30`). See
+the forward-model population note above for the mechanics. This is what lets the
+raised density fill crowded frames by packing while keeping a realistic minority
+of overlapping/nested GUVs.
 
 Everything the calibration *did* constrain stays fixed at the base
 (`fitted_config.yaml`) values: `psf.sigma`, `ring.brightness`/`thickness`, the
@@ -287,15 +355,34 @@ the (unlabeled) haze and aggregates.
 ./run_all.sh --smoke               # tiny end-to-end sanity run
 uv run python src/train.py    --config configs/train.yaml [--smoke]
 uv run python src/evaluate.py --config configs/eval.yaml
-uv run python src/detect.py   --checkpoint runs/guvnet/best.pt --image <png|tif>
-uv run python scripts/detect_real.py --checkpoint runs/guvnet/best.pt --images data
+uv run python src/detect.py   --checkpoint models/best.pt --image <png|tif>
+uv run python scripts/detect_real.py                 # single threshold (0.30)
+uv run python scripts/sweep_thresholds.py            # several thresholds at once
 ```
+
+### Real-image inference (local experiments)
+
+- **Model location:** the trained checkpoint lives at **`models/best.pt`**. It is
+  the default for `scripts/detect_real.py` and `scripts/sweep_thresholds.py`, so
+  no `--checkpoint` is needed. `models/` is gitignored (the `.pt` is large) but
+  kept via `models/.gitkeep`.
+- **Output convention:** `scripts/detect_real.py` auto-names its output folder by
+  threshold → **`results/thresh_<value>/`** (e.g. `results/thresh_0.10/`,
+  `results/thresh_0.30/`), so runs at different thresholds never overwrite. An
+  explicit `--out` overrides. `results/` is gitignored (kept via `.gitkeep`).
+- **Single threshold:** `uv run python scripts/detect_real.py --threshold 0.15`
+  → writes `results/thresh_0.15/` (3-panel PNG per image — raw | detections
+  overlay | heatmap — plus `_grid.png`).
+- **Sweep:** `uv run python scripts/sweep_thresholds.py --thresholds 0.10 0.15 0.20 0.25 0.30`
+  runs `detect_real.py` once per threshold (each to its own
+  `results/thresh_<value>/`). Defaults to that list, `models/best.pt`, and
+  `data/`. It dispatches `detect_real.py` as a subprocess so the inference path
+  is identical to a single run.
 
 `scripts/detect_real.py` is the **qualitative real-image transfer check** (no GT):
 per real image it loads via the shared normalization, runs the `detect.py`
-pipeline, and writes a 3-panel PNG (raw | detections overlay | heatmap) to
-`detect_real_out/` plus an overview `_grid.png`. Tune `--threshold`/`--nms-dist`
-to inspect transfer without retraining.
+pipeline, and writes the 3-panel PNG + `_grid.png`. Tune `--threshold`/`--nms-dist`
+to inspect transfer without retraining. (On a non-CUDA box pass `--device cpu`.)
 
 Key pieces:
 - **Shared normalization** (`src/normalize.py`): the ONE place uint8 → `[0,1]`

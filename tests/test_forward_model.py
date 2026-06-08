@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.forward_model import (
     GUV,
     _render_guv,
+    _sample_guvs,
     load_config,
     simulate_batch,
     simulate_image,
@@ -283,6 +284,64 @@ def test_return_debug_exposes_cut_geometry(config):
         assert isinstance(g, GUV)
         # Apparent diameter never exceeds the true sphere diameter.
         assert g.apparent_diameter <= g.sphere_diameter + 1e-6
+
+
+def _heavy_overlap_fraction(guvs):
+    """Fraction of GUV pairs whose centers are closer than 0.5*(r_i+r_j)
+    (i.e. heavily overlapping / nested)."""
+    n = len(guvs)
+    if n < 2:
+        return 0.0
+    heavy = total = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = guvs[i], guvs[j]
+            ra, rb = a.apparent_diameter / 2.0, b.apparent_diameter / 2.0
+            d2 = (a.x - b.x) ** 2 + (a.y - b.y) ** 2
+            total += 1
+            if d2 < (0.5 * (ra + rb)) ** 2:
+                heavy += 1
+    return heavy / total
+
+
+def test_soft_exclusion_reduces_overlap(config):
+    """Soft-exclusion placement yields far fewer heavily-overlapping pairs than
+    the old uniform placement (min_separation_factor = 0), at the same density."""
+    cfg = copy.deepcopy(config)
+    cfg["guvs"]["count"] = 80  # crowded frame
+
+    # Strong exclusion, no allowed-overlap minority.
+    cfg["guvs"]["min_separation_factor"] = 1.0
+    cfg["guvs"]["allowed_overlap_fraction"] = 0.0
+    excluded = _sample_guvs(cfg["guvs"], cfg["cut"], cfg["image"]["size"],
+                            np.random.default_rng(7))
+
+    # Disabled exclusion -> plain uniform placement.
+    cfg["guvs"]["min_separation_factor"] = 0.0
+    uniform = _sample_guvs(cfg["guvs"], cfg["cut"], cfg["image"]["size"],
+                           np.random.default_rng(7))
+
+    # Same count is always produced (placement is capped, never drops GUVs).
+    assert len(excluded) == len(uniform) == 80
+    # Exclusion drastically cuts heavy overlap.
+    assert _heavy_overlap_fraction(excluded) < 0.5 * _heavy_overlap_fraction(uniform)
+
+
+def test_allowed_overlap_fraction_keeps_some_overlap(config):
+    """A high allowed-overlap fraction keeps more overlapping pairs than a low one
+    (the knob genuinely controls the retained-overlap minority)."""
+    cfg = copy.deepcopy(config)
+    cfg["guvs"]["count"] = 80
+    cfg["guvs"]["min_separation_factor"] = 1.0
+
+    cfg["guvs"]["allowed_overlap_fraction"] = 0.0
+    strict = _sample_guvs(cfg["guvs"], cfg["cut"], cfg["image"]["size"],
+                          np.random.default_rng(3))
+    cfg["guvs"]["allowed_overlap_fraction"] = 0.6
+    loose = _sample_guvs(cfg["guvs"], cfg["cut"], cfg["image"]["size"],
+                         np.random.default_rng(3))
+
+    assert _heavy_overlap_fraction(loose) > _heavy_overlap_fraction(strict)
 
 
 def test_simulate_batch_shape(config):

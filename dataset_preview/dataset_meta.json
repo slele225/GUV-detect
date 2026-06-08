@@ -1,0 +1,51 @@
+{
+  "n_images": 12,
+  "n_train": 12,
+  "n_val": 0,
+  "seed": 0,
+  "image_format": "png",
+  "label_format": "json",
+  "base_config": "calibration_out/fitted_config.yaml",
+  "randomized_params": {
+    "guv_density": [
+      10.0,
+      150.0
+    ],
+    "cut_axial_extent": [
+      1.0,
+      8.0
+    ],
+    "enf": [
+      1.0,
+      1.6
+    ],
+    "product_jitter": [
+      0.85,
+      1.2
+    ]
+  },
+  "size_distribution": {
+    "size_dist": "mixture",
+    "small_fraction": 0.72,
+    "small_log_mean": 3.4,
+    "small_log_sigma": 0.6,
+    "large_log_mean": 4.4,
+    "large_log_sigma": 0.5
+  },
+  "placement": {
+    "min_separation_factor": 0.9,
+    "allowed_overlap_fraction": 0.12,
+    "placement_max_attempts": 30
+  },
+  "fixed_from_calibration": {
+    "psf.sigma": 2.83243287923332,
+    "ring.brightness": 197.50170597717366,
+    "ring.thickness": 4.196055909576104,
+    "ring.rim_variation": 0.4,
+    "noise.offset": 31.09524029948407,
+    "noise.read_noise": 0.18704275393859032,
+    "noise.optical_bg": 15.935507362481344,
+    "background.oof_amplitude": 38.4581650247771
+  },
+  "note": "Only in-focus GUVs are labeled; out-of-focus haze and saturated aggregates are distractors and are never labeled."
+}

@@ -34,15 +34,19 @@ dataset:
 # overfitting one point estimate. (Each is sampled uniformly over its [lo, hi].)
 # ---------------------------------------------------------------------------
 randomize:
-  # In-focus GUV density (mean count / frame). Calibration chose ~15; real fields
-  # have more small faint GUVs, so cover sparse -> crowded and slightly exceed it.
-  guv_density: [10.0, 40.0]
+  # In-focus GUV density (mean count / frame), drawn UNIFORMLY per image over
+  # [lo, hi]. Real fields hold ~40-80 GUVs; we keep the FLOOR at 10 (not higher)
+  # so the detector still trains on sparse fields and won't over-predict density
+  # on near-empty real regions, and raise the CEILING to 150 to fill even the
+  # densest real fields (sparse -> very crowded). With the soft-
+  # exclusion placement (see `placement:` below), a high density now fills the
+  # frame by PACKING GUVs rather than piling them into overlapping rings, so the
+  # ceiling can be pushed up to match the densest real fields.
+  guv_density: [10.0, 150.0]
 
-  # Lognormal sphere-diameter params, around the fitted values (~3.95 / ~0.86)
-  # but BIASED to include MORE small GUVs than the global-stat fit chose (real is
-  # small-dominated; the global fit under-weights the small end).
-  size_log_mean: [3.4, 4.0]      # <= fit -> smaller median diameter
-  size_log_sigma: [0.75, 1.05]   # >= fit -> wider spread, more small GUVs
+  # NOTE: the sphere-diameter distribution is no longer randomized here. It is a
+  # fixed two-component mixture under `size_distribution:` below (a deliberate
+  # population change, distinct from the calibrated physics).
 
   # Focal-plane-cut fill factor -> the ring <-> disc continuum. This was NEVER
   # constrained by calibration (a minority effect on global moments, hence pinned
@@ -56,6 +60,57 @@ randomize:
   # calibrated effective noise scale.
   enf: [1.0, 1.6]
   product_jitter: [0.85, 1.20]   # per-image multiplier on the fitted gain*enf
+
+# ---------------------------------------------------------------------------
+# SPHERE-DIAMETER SIZE DISTRIBUTION -- two-component lognormal mixture.
+#
+# This is a DELIBERATE POPULATION CHANGE, NOT a calibrated physics parameter.
+# Calibration's single lognormal could not simultaneously (a) pile most mass at
+# the small end (real fields are dominated by small vesicles, which the global-
+# moment fit under-weights) AND (b) keep a realistic minority of large vesicles
+# reaching up toward d_max. A mixture does both. These five knobs are NOT
+# randomized -- they are fixed defaults meant to be tuned BY EYE against a small
+# preview (see scripts/preview_dataset.py --generate 12) before a full regen.
+#
+# All values are in SPHERE diameter (px); the focal-plane cut then reduces each
+# to an APPARENT diameter that is rejection-sampled into the base config's
+# [d_min, d_max] = [12, 150] px (existing logic in forward_model.py).
+#
+# Tuning directions:
+#   small_fraction  UP   -> MORE small GUVs (more of the population is small).
+#   small_log_mean  UP   -> small GUVs get LARGER (median = e^mean px).
+#   small_log_sigma UP   -> small GUVs more spread out (longer small-side tail).
+#   large_log_mean  UP   -> large GUVs get LARGER (median = e^mean px).
+#   large_log_sigma UP   -> large GUVs more spread out (more reach toward d_max).
+# The two components are deliberately WIDE and OVERLAPPING so the combined size
+# spread is CONTINUOUS (a smooth small-dominated falloff with real density at
+# medium sizes), NOT two separate humps. Widen a component (raise its log_sigma)
+# or pull the large component's median down (lower large_log_mean) if previews
+# still look bimodal; tighten them if the spread looks too flat.
+size_distribution:
+  size_dist: mixture
+  small_fraction: 0.72   # 72% of GUVs from the SMALL component, 28% from LARGE.
+  small_log_mean: 3.40   # SMALL median ~= e^3.40 = 30 px (the common vesicles).
+  small_log_sigma: 0.60  # SMALL spread: wide -> reaches up into the medium range.
+  large_log_mean: 4.40   # LARGE median ~= e^4.40 = 81 px (reaches DOWN into medium).
+  large_log_sigma: 0.50  # LARGE spread: broad, overlapping the small tail; -> 150.
+
+# ---------------------------------------------------------------------------
+# GUV PLACEMENT -- soft-exclusion (minimum-separation) model.
+#
+# DECOUPLES overlap from density. Real GUVs mostly exclude one another (pack /
+# tile) with only an occasional nested/overlapping pair, so each GUV rejects
+# candidate centers that fall closer than `min_separation_factor * (r_i + r_j)`
+# (apparent radii) to an already-placed GUV, except a minority allowed to overlap
+# anyway. This lets a high `guv_density` FILL the frame by packing instead of by
+# piling overlapping rings. These knobs override the base config's `guvs.*`
+# placement values for generation. Tuning directions:
+#   min_separation_factor    UP -> more spread out, LESS overlap (1 = just-tangent).
+#   allowed_overlap_fraction UP -> MORE overlapping/nested pairs kept.
+placement:
+  min_separation_factor: 0.9     # required center gap = factor * (r_i + r_j).
+  allowed_overlap_fraction: 0.12  # ~12% of GUVs may ignore the rule (overlap/nest).
+  placement_max_attempts: 30     # rejection-sampling cap per GUV (then keep last).
 
 # ---------------------------------------------------------------------------
 # FIXED from calibration (these ARE constrained by the lipid statistics) and

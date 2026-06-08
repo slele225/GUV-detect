@@ -116,16 +116,34 @@ def _sample_count(pop_cfg: dict, rng: np.random.Generator) -> int:
 def _sample_sphere_diameter(guv_cfg: dict, rng: np.random.Generator) -> float:
     """Draw one true sphere diameter (px) from the small-heavy size distribution.
 
-    Default is lognormal: diameter = exp(Normal(log_mean, log_sigma)). Lognormal
-    is naturally small-dominated with a long thin tail toward large vesicles,
-    matching real GUV populations far better than a uniform draw. The shape
-    parameters are CALIBRATE placeholders to be fit against real images.
+    Two distributions are supported via `size_dist`:
+
+    - "lognormal" (default; used by calibration): a single lognormal,
+      diameter = exp(Normal(sphere_diameter_log_mean, sphere_diameter_log_sigma)).
+      Naturally small-dominated with a long thin tail toward large vesicles. The
+      shape parameters are CALIBRATE placeholders fit against real images.
+
+    - "mixture" (used by dataset generation): a TWO-COMPONENT lognormal mixture.
+      Each GUV is independently assigned to the SMALL component with probability
+      `small_fraction`, else to the LARGE component; the chosen component's
+      lognormal (its own `*_log_mean` / `*_log_sigma`) is then drawn. This is a
+      deliberate POPULATION choice (not calibrated physics): a single lognormal
+      cannot simultaneously pile mass at the small end AND keep a realistic
+      minority of large vesicles. See configs/dataset.yaml for the five knobs.
     """
     dist = guv_cfg.get("size_dist", "lognormal")
-    if dist != "lognormal":
+    if dist == "lognormal":
+        log_mean = float(guv_cfg["sphere_diameter_log_mean"])
+        log_sigma = float(guv_cfg["sphere_diameter_log_sigma"])
+    elif dist == "mixture":
+        if rng.random() < float(guv_cfg["small_fraction"]):
+            log_mean = float(guv_cfg["small_log_mean"])
+            log_sigma = float(guv_cfg["small_log_sigma"])
+        else:
+            log_mean = float(guv_cfg["large_log_mean"])
+            log_sigma = float(guv_cfg["large_log_sigma"])
+    else:
         raise ValueError(f"unsupported size_dist: {dist!r}")
-    log_mean = float(guv_cfg["sphere_diameter_log_mean"])
-    log_sigma = float(guv_cfg["sphere_diameter_log_sigma"])
     return float(np.exp(rng.normal(log_mean, log_sigma)))
 
 
@@ -167,10 +185,56 @@ def _sample_one_guv(guv_cfg: dict, cut_cfg: dict, size: int, rng: np.random.Gene
     return GUV(x=x, y=y, apparent_diameter=apparent_d, sphere_diameter=sphere_d, cut_offset=cut_offset)
 
 
+def _too_close(guv: GUV, placed: list, min_sep_factor: float) -> bool:
+    """True if `guv`'s center is closer than `min_sep_factor * (r_i + r_j)` to any
+    already-placed GUV `j` (radii are APPARENT radii = the rendered extent). With
+    `min_sep_factor = 1` two GUVs must be at least tangent (no overlap); < 1
+    permits some overlap; > 1 forces a gap between them."""
+    r_i = guv.apparent_diameter / 2.0
+    for other in placed:
+        req = min_sep_factor * (r_i + other.apparent_diameter / 2.0)
+        dx = guv.x - other.x
+        dy = guv.y - other.y
+        if dx * dx + dy * dy < req * req:
+            return True
+    return False
+
+
 def _sample_guvs(guv_cfg: dict, cut_cfg: dict, size: int, rng: np.random.Generator) -> list:
-    """Sample the in-focus GUV population for one frame."""
+    """Sample the in-focus GUV population for one frame.
+
+    Placement uses a SOFT-EXCLUSION (minimum-separation) model so that overlap is
+    decoupled from density: real GUVs are physical objects that mostly exclude one
+    another (they pack/tile) rather than pile up, so raising the density fills the
+    frame by PACKING instead of by overlapping. For each GUV we reject candidate
+    centers that fall closer than `min_separation_factor * (r_i + r_j)` to any
+    already-placed GUV (apparent radii), via rejection sampling capped at
+    `placement_max_attempts` attempts. With probability `allowed_overlap_fraction`
+    a GUV skips the check entirely and is placed wherever it first landed, so a
+    realistic MINORITY of genuinely overlapping / nested cases is kept. Setting
+    `min_separation_factor = 0` disables exclusion (the old uniform placement)."""
     n = _sample_count(guv_cfg, rng)
-    return [_sample_one_guv(guv_cfg, cut_cfg, size, rng) for _ in range(n)]
+    min_sep_factor = float(guv_cfg.get("min_separation_factor", 0.0))
+    allowed_overlap = float(guv_cfg.get("allowed_overlap_fraction", 1.0))
+    place_attempts = int(guv_cfg.get("placement_max_attempts", 30))
+
+    placed: list = []
+    for _ in range(n):
+        guv = _sample_one_guv(guv_cfg, cut_cfg, size, rng)
+        # Exclusion applies unless disabled, this is the first GUV, or this GUV is
+        # in the allowed-overlap minority (drawn BEFORE the placement loop so the
+        # RNG stream is independent of how many attempts placement happens to use).
+        enforce = min_sep_factor > 0.0 and placed and rng.random() >= allowed_overlap
+        if enforce:
+            for _attempt in range(place_attempts):
+                if not _too_close(guv, placed, min_sep_factor):
+                    break
+                guv.x = rng.uniform(0.0, size)
+                guv.y = rng.uniform(0.0, size)
+            # On exhausting attempts we keep the last candidate -- a capped retry
+            # means very crowded frames stay realistic instead of looping forever.
+        placed.append(guv)
+    return placed
 
 
 def _render_guv(

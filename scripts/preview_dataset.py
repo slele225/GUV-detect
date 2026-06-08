@@ -1,5 +1,10 @@
 """Overlay ground-truth labels on generated images to verify the dataset.
 
+    # Eyeball the NEW size-mixture + density distribution on ~12 fresh images
+    # (generates them on the fly at the current configs/dataset.yaml settings):
+    uv run python scripts/preview_dataset.py --generate 12
+
+    # Or overlay labels on an already-generated dataset:
     uv run python scripts/preview_dataset.py
     uv run python scripts/preview_dataset.py --config configs/dataset.yaml \
         --n 9 --split train --out dataset/preview_labels.png
@@ -8,17 +13,25 @@ Loads a handful of generated images and draws a circle at each labeled
 (x, y) with the labeled diameter. Use it to check that labels land on the
 in-focus rings/discs -- and that the out-of-focus haze and the bright saturated
 aggregates are correctly NOT circled (they must stay unlabeled).
+
+With --generate N it first generates N fresh images into a small preview dir
+(val_ratio 0, serial) using the SAME mixture + density settings as a full run, so
+you can tune the five size knobs and the density range against real images before
+committing to a full 20k regeneration.
 """
 
 import argparse
 import csv
 import json
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 from matplotlib.patches import Circle
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def _load_image(out_dir: Path, rel: str) -> np.ndarray:
@@ -53,11 +66,34 @@ def main():
     parser.add_argument("--n", type=int, default=9)
     parser.add_argument("--split", default="train")
     parser.add_argument("--out", default=None)
+    parser.add_argument(
+        "--generate", type=int, default=0, metavar="N",
+        help="generate N fresh images first (at the current mixture/density "
+             "settings) into a preview dir, then overlay them. Use to eyeball "
+             "the distribution before a full regen, e.g. --generate 12.",
+    )
     args = parser.parse_args()
 
     with open(args.config) as f:
         ds_cfg = yaml.safe_load(f)
-    out_dir = repo_root / ds_cfg["output"]["dir"]
+
+    if args.generate > 0:
+        # Generate a fresh small set on the fly using the SAME config (base,
+        # randomize, size_distribution), into a dedicated preview dir.
+        from src.forward_model import load_config
+        from src.generate_dataset import generate_dataset
+
+        base_cfg = load_config(repo_root / ds_cfg["base_config"])
+        ds_cfg["dataset"]["n_images"] = args.generate
+        ds_cfg["dataset"]["val_ratio"] = 0.0
+        ds_cfg["output"]["dir"] = "dataset_preview"
+        out_dir = repo_root / ds_cfg["output"]["dir"]
+        print(f"Generating {args.generate} preview images -> {out_dir}")
+        generate_dataset(ds_cfg, base_cfg, out_dir, n_workers=1)
+        args.split = "train"
+        args.n = args.generate
+    else:
+        out_dir = repo_root / ds_cfg["output"]["dir"]
 
     manifest = out_dir / "manifest.csv"
     if not manifest.exists():
